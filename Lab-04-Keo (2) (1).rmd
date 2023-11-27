@@ -1,0 +1,445 @@
+---
+title: "Lab-03 Identifying Neighborhood Clusters"
+output:
+  html_document:
+    theme: readable
+    highlight: tango
+    toc: true
+    self_contained: false
+    number_sections: false
+    css: textbook.css
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=T, fig.width=10, fig.height=6, warning=F, message=F )
+```
+
+
+
+# Packages
+
+```{r}
+library( geojsonio )   # read shapefiles
+library( sp )          # work with shapefiles
+library( sf )          # work with shapefiles - simple features format
+library( mclust )      # cluster analysis 
+library( tmap )        # theme maps
+library( ggplot2 )     # graphing 
+library( ggthemes )    # nice formats for ggplots
+library( dplyr )       # data wrangling 
+library( pander )      # formatting RMD tables
+library( tidycensus )
+
+library( cartogram )  # spatial maps w/ tract size bias reduction
+
+```
+
+PART 1:
+
+Select a city, build your dataset, and cluster the neighborhoods in your city using the same techniques we used last week.
+
+Show the clusters and the cluster demographics for the new city.
+
+Report the labels you have assigned to each group.
+
+
+## Data Source
+
+**DATA DICTIONARY**
+
+```{r}
+crosswalk <- read.csv( "https://raw.githubusercontent.com/DS4PS/cpp-529-master/master/data/cbsatocountycrosswalk.csv",  stringsAsFactors=F, colClasses="character" )
+
+grep( "^SAN DIE", crosswalk$msaname, value=TRUE ) 
+grep( "^CALI", crosswalk$msaname, value=TRUE )
+
+
+```
+```{r}
+these.sdp <- crosswalk$msaname == "SAN DIEGO, CA"
+these.fips <- crosswalk$fipscounty[ these.sdp ]
+these.fips <- na.omit( these.fips )
+```
+
+
+# Load San Diego Shapefile
+
+We are using a [Dorling Cartogram](https://github.com/sjewo/cartogram) representation of Census tracts to remove bias.
+
+The steps to create the cartogram are described [HERE](https://github.com/DS4PS/cpp-529-master/tree/master/data). 
+
+```{r}
+
+library( tidycensus )
+
+census_api_key("d1ebc703b11d55a73a9085894cf21895f1cc8450")
+key <- "d1ebc703b11d55a73a9085894cf21895f1cc8450"
+census_api_key("d1ebc703b11d55a73a9085894cf21895f1cc8450")
+
+these.msp <- crosswalk$msaname == "SAN DIEGO, CA"
+these.fips <- crosswalk$fipscounty[ these.msp ]
+these.fips <- na.omit( these.fips )
+state.fips <- substr( these.fips, 1, 2 )
+county.fips <- substr( these.fips, 3, 5 )
+cbind( these.fips, state.fips, county.fips ) %>% pander()
+
+
+
+```
+
+```{r}
+sd.p <-
+get_acs( geography = "tract", variables = "B01003_001",
+         state = "06", county = county.fips[state.fips=="06"], geometry = TRUE ) %>% 
+         select( GEOID, estimate ) %>%
+         rename( POP=estimate )
+getwd()
+
+```
+
+
+```{r}
+URL <- "https://github.com/DS4PS/cpp-529-master/raw/master/data/ltdb_std_2010_sample.rds"
+census.dat <- readRDS(gzcon(url( URL )))
+
+sdp <- merge( sd.p, census.dat, by.x="GEOID", by.y="tractid" )
+
+
+sdp <- sdp[ ! st_is_empty( sdp ) , ]
+
+```
+
+
+
+```{r}
+URL <- "https://github.com/DS4PS/cpp-529-master/raw/master/data/ltdb_std_2010_sample.rds"
+census.dat <- readRDS(gzcon(url( URL )))
+
+# can merge an sf object and data.frame
+sd.p$GEOID<-sub('.', '', sd.p$GEOID)
+sdp <- merge( sd.p, census.dat, by.x="GEOID", by.y="tractid" )
+
+
+sdp <- sdp[ ! st_is_empty( sdp ) , ]
+
+```
+
+```{r}
+sd.sp <- as_Spatial( sdp )
+
+class( sd.sp )
+```
+
+```{r}
+plot( sd.sp )
+```
+
+```{r}
+# project map and remove empty tracts
+sd.sp <- spTransform( sd.sp, CRS("+init=epsg:3395"))
+sd.sp <- sd.sp[ sd.sp$POP != 0 & (! is.na( sd.sp$POP )) , ]
+
+# convert census tract polygons to dorling cartogram
+# no idea why k=0.03 works, but it does - default is k=5
+sd.sp$pop.w <- sd.sp$POP / 9000 # max(msp.sp$POP)   # standardizes it to max of 1.5
+sd_dorling <- cartogram_dorling( x=sd.sp, weight="pop.w", k=0.05 )
+plot( sd_dorling )
+```
+
+```{r}
+tm_shape( sd_dorling ) + 
+  tm_polygons( size="POP", col="hinc12", n=7, style="quantile", palette="Spectral" ) 
+```
+
+```{r}
+library(geojsonio)
+sd_dorling<-spTransform(sd_dorling, CRS("+proj=longlat +datum=WGS84"))
+geojson_write(sd_dorling,file="sd_dorling.geojson", geometry="polygon")
+```
+
+
+```{r}
+# user-defined bounding box to move slocer to subjects 
+bb <- st_bbox( c( xmin =  -13052000, xmax = -13007500, 
+                  ymax = 3864100, ymin = 3812100 ), 
+                  crs = st_crs("+init=epsg:3395"))
+
+tm_shape( sd_dorling, bbox=bb ) + 
+  tm_polygons( col="hinc12", n=10, style="quantile", palette="Spectral" ) +
+  tm_layout( "Dorling Cartogram", title.position=c("right","top") )
+```
+
+```{r}
+keep.these <- c("pnhwht12", "pnhblk12", "phisp12", "pntv12", "pfb12", "polang12", 
+"phs12", "pcol12", "punemp12", "pflabf12", "pprof12", "pmanuf12", 
+"pvet12", "psemp12", "hinc12", "incpc12", "ppov12", "pown12", 
+"pvac12", "pmulti12", "mrent12", "mhmval12", "p30old12", "p10yrs12", 
+"p18und12", "p60up12", "p75up12", "pmar12", "pwds12", "pfhh12")
+
+d1 <- sd_dorling@data
+d2 <- select( d1, keep.these )
+d3 <- apply( d2, 2, scale )
+head( d3[,1:6] ) %>% pander()
+```
+```{r}
+keep.these <- c("pnhwht12", "pnhblk12", "phisp12", "pntv12", "pfb12", "polang12", 
+"phs12", "pcol12", "punemp12", "pflabf12", "pprof12", "pmanuf12", 
+"pvet12", "psemp12", "hinc12", "incpc12", "ppov12", "pown12", 
+"pvac12", "pmulti12", "mrent12", "mhmval12", "p30old12", "p10yrs12", 
+"p18und12", "p60up12", "p75up12", "pmar12", "pwds12", "pfhh12")
+
+d2 <- select( d1, keep.these )
+d3 <- apply( d2, 2, scale )
+
+head( d3[,1:6] ) %>% pander()
+```
+
+
+```{r}
+# library( mclust )
+set.seed( 1234 )
+fit <- Mclust( d3 )
+sd_dorling$cluster <- as.factor( fit$classification )
+summary( fit )
+```
+
+Identifying Neighborhood Clusters
+
+
+```{r}
+df.pct <- sapply( d2, ntile, 100 )
+d4 <- as.data.frame( df.pct )
+d4$cluster <- as.factor( paste0("GROUP-",fit$classification) )
+
+num.groups <- length( unique( fit$classification ) )
+
+stats <- 
+d4 %>% 
+  group_by( cluster ) %>% 
+  summarise_each( funs(mean) )
+
+t <- data.frame( t(stats), stringsAsFactors=F )
+names(t) <- paste0( "GROUP.", 1:num.groups )
+t <- t[-1,]
+
+
+
+for( i in 1:num.groups )
+{
+  z <- t[,i]
+  plot( rep(1,30), 1:30, bty="n", xlim=c(-75,100), 
+        type="n", xaxt="n", yaxt="n",
+        xlab="Percentile", ylab="",
+        main=paste("GROUP",i) )
+  abline( v=seq(0,100,25), lty=3, lwd=1.5, col="gray90" )
+  segments( y0=1:30, x0=0, x1=100, col="gray70", lwd=2 )
+  text( -0.2, 1:30, data.dictionary$VARIABLE[-1], cex=0.85, pos=2 )
+  points( z, 1:30, pch=19, col="firebrick", cex=1.5 )
+  axis( side=1, at=c(0,50,100), col.axis="gray", col="gray" )
+}
+```
+
+```{r}
+summary( d2[ , 1:3 ] )
+```
+
+```{r}
+summary( d3[ , 1:3 ] )
+```
+
+```{r}
+library( corrplot )
+
+d3 <- as.data.frame(d3)
+
+df.dim1 <- dplyr::select( d3, pown12, pmulti12, p10yrs12, pwds12, pfhh12 )
+
+corrplot( cor(df.dim1, use="complete.obs"), 
+          order = "hclust", tl.col='black', tl.cex=.75 ) 
+```
+
+```{r}
+df.dim1$pmulti12  <-  - df.dim1$pmulti12
+df.dim1$p10yrs12  <-  - df.dim1$p10yrs12
+df.dim1$pwds12    <-  - df.dim1$pwds12
+df.dim1$pfhh12    <-  - df.dim1$pfhh12
+
+corrplot( cor(df.dim1, use="complete.obs"), 
+          order = "hclust", tl.col='black', tl.cex=.75 ) 
+```
+
+```{r}
+df.dim2 <- d3[ c("pnhwht12", "pnhblk12", "phisp12", "pfb12", "polang12") ]
+
+# Check direction
+# Need to flip percent white 
+
+corrplot( cor(df.dim2, use="complete.obs"), 
+          order = "hclust", tl.col='black', tl.cex=.75 ) 
+```
+
+```{r}
+df.dim3 <- select( d3, pcol12, phs12, pprof12, hinc12, mhmval12 )
+
+
+corrplot( cor(df.dim3, use="complete.obs"), 
+          order = "hclust", tl.col='black', tl.cex=.75 ) 
+
+```
+
+
+```{r}
+dim1 <- d3$pown12 - d3$pmulti12 - d3$p10yrs12 - d3$pwds12 - d3$pfhh12
+dim2 <- - d3$pnhwht12 + d3$pnhblk12 + d3$phisp12 + d3$pfb12 + d3$polang12
+dim3 <- d3$pcol12 - d3$phs12 + d3$pprof12 + d3$hinc12 + d3$mhmval12
+
+df.nhood.metrics <- data.frame( dim1, dim2, dim3 )
+summary( df.nhood.metrics )
+```
+
+```{r}
+corrplot( cor( df.nhood.metrics, use="complete.obs" ), 
+          order = "hclust", tl.col='black', tl.cex=.75 ) 
+```
+
+```{r}
+
+fit2 <- Mclust( df.nhood.metrics )
+summary( fit2 )
+```
+
+```{r}
+sd_dorling$cluster2 <- as.factor( fit2$classification )
+
+
+d33 <- data.frame( d3$p18und12, d3$pflabf12, d3$hinc12 )
+fit3 <- Mclust( d33 )
+summary( fit3 )
+```
+
+```{r}
+sd_dorling$cluster3 <- as.factor( fit3$classification )
+
+
+
+tmap_mode("plot")
+tmap_style("cobalt")
+
+tm1 <- 
+tm_shape( sd_dorling, bbox=bb ) + 
+  tm_polygons( col="cluster", palette="Accent"  )
+
+tm2 <- 
+tm_shape( sd_dorling, bbox=bb ) + 
+  tm_polygons( col="cluster2", palette="Accent"  )
+
+tm3 <- 
+tm_shape( sd_dorling, bbox=bb ) + 
+  tm_polygons( col="cluster3", palette="Accent"  )
+
+
+tmap_arrange( tm1, tm2, tm3 )
+```
+
+```{r}
+plot( fit, what = "classification" )
+```
+
+```{r}
+plot( fit2, what = "classification" )
+```
+
+```{r}
+plot( fit3, what = "classification" )
+```
+PART 1 LABELS:
+GROUP 1 - Mixed socioeconomic neighborhood undergoing gentrified redevelopment
+GROUP 2 - Professional working class surburban neighborhood
+GROUP 3 - Mixed cultural enclave 
+GROUP 4 - Wealthy business owners 
+GROUP 5 - Predominently Hispanic neighborhood
+GROUP 6 - Educated neighborhood
+
+PART 2:
+
+Part 2 explores how the input data impacts your clusters.
+
+You will use your full model with 30 census variables as the reference point, then do the following:
+
+Question 1:
+
+Compare that set of groups to the groups identified by the model using only the three indices above. Are they identifying the same groups? Which group is missing?
+
+*There is some alignment with the original groups, but not all. In the new group of graphs, it looks as though Group 4 and 6 are not as well represented. Those 2 groups are very similar and overlap in qualities such as income levels and education so it might just be that the area we are looking at does not have as many clusters of these traits as the other variables.* 
+
+Question 2:
+
+Select three census variables from the full list of 30, and create a new clustering model. How many groups are generated? Are they similar groups to the full model? Are our inferences significantly different if we have a limited amount of data to draw from?
+
+Report your three variables and describe the groups that are identified.
+
+*The three variables used where Percent Hispanic, Percent professional employees, and Percent multi-family units. 3 groups where identified from this.*
+
+You can use the following to create data dictionaries to provide informative labels to the group percentile plots:
+
+```{r}
+# use dput( data.dictionary ) to create reproducible data frames for RMD files
+data.dictionary <- 
+structure(list(LABEL = c("pnhwht12", "pnhblk12", "phisp12", 
+"pntv12", "pfb12", "polang12", "phs12", "pcol12", "punemp12", 
+"pflabf12", "pprof12", "pmanuf12", "pvet12", "psemp12", "hinc12", 
+"incpc12", "ppov12", "pown12", "pvac12", "pmulti12", "mrent12", 
+"mhmval12", "p30old12", "p10yrs12", "p18und12", "p60up12", "p75up12", 
+"pmar12", "pwds12", "pfhh12"), VARIABLE = c("Percent white, non-Hispanic", 
+"Percent black, non-Hispanic", "Percent Hispanic", "Percent Native American race", 
+"Percent foreign born", "Percent speaking other language at home, age 5 plus", 
+"Percent with high school degree or less", "Percent with 4-year college degree or more", 
+"Percent unemployed", "Percent female labor force participation", 
+"Percent professional employees", "Percent manufacturing employees", 
+"Percent veteran", "Percent self-employed", "Median HH income, total", 
+"Per capita income", "Percent in poverty, total", "Percent owner-occupied units", 
+"Percent vacant units", "Percent multi-family units", "Median rent", 
+"Median home value", "Percent structures more than 30 years old", 
+"Percent HH in neighborhood 10 years or less", "Percent 17 and under, total", 
+"Percent 60 and older, total", "Percent 75 and older, total", 
+"Percent currently married, not separated", "Percent widowed, divorced and separated", 
+"Percent female-headed families with children")), class = "data.frame", row.names = c(NA, 
+-30L))
+
+
+use.these <- c("phisp12", "pprof12", "pmulti12")
+
+dd.cluster1 <- data.dictionary[ data.dictionary$LABEL %in% use.these , ]
+
+
+
+# cluster 2
+LABEL <- c("dim1","dim2","dim3")
+VARIABLE <- c("Neighborhood transitivity","Neighborhood diversity","Human capital")
+dd.cluster2 <- data.frame( LABEL, VARIABLE )
+
+
+# cluster 3 - update with your variables
+use.these <- c("phisp12", "pprof12", "pmulti12")
+dd.cluster3 <- data.dictionary[ data.dictionary$LABEL %in% use.these , ]
+
+d5 <- select( d1, use.these )
+d6 <- apply( d5, 2, scale )
+
+set.seed( 1234 )
+fit <- Mclust( d6 )
+sd_dorling$cluster <- as.factor( fit$classification )
+summary( fit )
+
+```
+
+
+Reflection (not graded, but please answer):
+
+Reflect on how the data we use in these models defines how we are defining and describing the neighborhoods (groups) within these models?
+
+Are these clusters valid constructs? Do we believe that they are accurately describing a concrete reality about the world? Would knowing which group that a tract is part of help us predict something about the tract, such as outcomes that children would experience living there, or how the tract might change over time?
+
+How do we know which is the right set of groups to use?
+
+*The data used in these models defines how we are defining and describing neighborhoods because the data is based on socioeconomic information so the labels are going to be in relationship to to these. The clusters are valid constructs since they are all backed up by actual data and tangible numbers. For the most part, they do accurately describe the world since there is correlation with various identities, cultures, education levels, income levels, etc. All these factors together can impact a neighborhood and shape a  community. Knowing which group that a tract is part of can help predict outcomes. In order to know which is the right set of groups to use, there has to be research done on the community prior in order to base the group selection on.*
